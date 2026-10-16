@@ -1,0 +1,58 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper: Periksa apakah pengguna sudah login
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Helper: Periksa apakah pengguna mengakses dokumen miliknya sendiri
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // Koleksi profil pengguna (users)
+    match /users/{userId} {
+      // 1. Baca (get): Hanya pemilik akun yang dapat membaca profilnya sendiri
+      // Query daftar (list) seluruh koleksi users dilarang untuk umum
+      allow get: if isOwner(userId);
+      allow list: if false;
+
+      // 2. Buat profil baru (create) saat registrasi di /daftar:
+      // - Harus login (UID auth cocok dengan Document ID)
+      // - Field dibatasi PERSIS sesuai PRD: nama, email, noHp, role, aktif, dibuatPada
+      // - Tidak boleh ada field ekstra (seperti password)
+      // - Role WAJIB 'pasien' (mencegah pendaftar mengklaim role admin/dokter/resepsionis)
+      // - Status akun default aktif (true)
+      allow create: if isOwner(userId)
+        && request.resource.data.keys().hasAll(['nama', 'email', 'noHp', 'role', 'aktif', 'dibuatPada'])
+        && request.resource.data.keys().hasOnly(['nama', 'email', 'noHp', 'role', 'aktif', 'dibuatPada'])
+        && request.resource.data.role == 'pasien'
+        && request.resource.data.aktif == true
+        && request.resource.data.nama is string && request.resource.data.nama.size() > 0
+        && request.resource.data.email is string && request.resource.data.email.size() > 0
+        && request.resource.data.noHp is string && request.resource.data.noHp.size() >= 10
+        && request.resource.data.dibuatPada is string;
+
+      // 3. Perbarui profil (update):
+      // - Hanya pemilik dokumen
+      // - Hanya boleh memperbarui nama dan noHp (sesuai PRD 4.5 Profil Pasien)
+      // - DILARANG mengubah role, email, status aktif, atau tanggal dibuat
+      allow update: if isOwner(userId)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['nama', 'noHp'])
+        && request.resource.data.role == resource.data.role
+        && request.resource.data.email == resource.data.email
+        && request.resource.data.aktif == resource.data.aktif
+        && request.resource.data.dibuatPada == resource.data.dibuatPada;
+
+      // 4. Hapus akun: Dilarang melalui client
+      allow delete: if false;
+    }
+
+    // Koleksi lain tetap ditutup penuh sampai tahap implementasi fiturnya masing-masing
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

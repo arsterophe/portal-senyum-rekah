@@ -1,0 +1,135 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper: Memeriksa apakah pengguna memiliki sesi login Firebase Authentication yang sah
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Helper: Memeriksa kepemilikan dokumen berdasarkan UID pemanggil
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // Helper: Memeriksa bahwa pemanggil terdaftar dan berstatus AKTIF di database
+    // Menggunakan get() langsung ke dokumen database server (tidak dapat dipalsukan klien)
+    function isActiveUser() {
+      return isAuthenticated()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.aktif == true;
+    }
+
+    // Helper: Memeriksa bahwa pemanggil adalah Super Admin yang AKTIF
+    function isSuperAdmin() {
+      return isActiveUser()
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'super_admin';
+    }
+
+    // Helper: Memeriksa bahwa pemanggil adalah Staf Klinik yang AKTIF (Dokter, Resepsionis, atau Super Admin)
+    function isStaff() {
+      return isActiveUser()
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['dokter', 'resepsionis', 'super_admin'];
+    }
+
+    // 1. Koleksi Profil Pengguna (users)
+    match /users/{userId} {
+      // get:
+      // - Pemilik akun boleh membaca datanya sendiri (termasuk saat dinonaktifkan untuk deteksi status di AuthContext)
+      // - Super Admin aktif boleh membaca seluruh profil
+      // - Staf aktif (Dokter & Resepsionis) boleh membaca profil pasien (PRD 2.3 & 4.8)
+      // - Pengguna aktif boleh membaca profil dokter (PRD 4.3.1 untuk memilih dokter saat buat janji)
+      allow get: if isOwner(userId)
+        || isSuperAdmin()
+        || (isStaff() && resource.data.role == 'pasien')
+        || (isActiveUser() && resource.data.role == 'dokter');
+
+      // list:
+      // - Super Admin aktif boleh melihat seluruh pengguna tanpa filter
+      // - Staf aktif (Resepsionis & Dokter) boleh melihat daftar pasien klinik (PRD 4.8 Buku Kontak: query role == 'pasien')
+      // - Pengguna aktif boleh melihat daftar dokter klinik (PRD 4.3.1: query role == 'dokter')
+      allow list: if isSuperAdmin()
+        || (isStaff() && resource.data.role == 'pasien')
+        || (isActiveUser() && resource.data.role == 'dokter');
+
+      // Registrasi publik di /daftar:
+      // - UID Auth harus sama dengan Document ID (isOwner)
+      // - Role WAJIB 'pasien' (mencegah pendaftaran langsung mengklaim admin/staf)
+      // - Status akun WAJIB aktif (true)
+      // - Field dibatasi persis: nama, email, noHp, role, aktif, dibuatPada
+      allow create: if isOwner(userId)
+        && request.resource.data.keys().hasAll(['nama', 'email', 'noHp', 'role', 'aktif', 'dibuatPada'])
+        && request.resource.data.keys().hasOnly(['nama', 'email', 'noHp', 'role', 'aktif', 'dibuatPada'])
+        && request.resource.data.role == 'pasien'
+        && request.resource.data.aktif == true
+        && request.resource.data.nama is string && request.resource.data.nama.size() > 0 && request.resource.data.nama.size() <= 100
+        && request.resource.data.email is string && request.resource.data.email.size() > 0 && request.resource.data.email.size() <= 150
+        && request.resource.data.noHp is string && request.resource.data.noHp.size() >= 10 && request.resource.data.noHp.size() <= 20
+        && request.resource.data.dibuatPada is string;
+
+      // Update profil:
+      // Jalur A: Pembaruan profil mandiri oleh pengguna aktif (/profil)
+      // Jalur B: Otoritas Super Admin aktif mengelola pengguna lain (/admin/pengguna/[id])
+      allow update: if (
+        isActiveUser()
+        && isOwner(userId)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['nama', 'noHp'])
+        && request.resource.data.role == resource.data.role
+        && request.resource.data.aktif == resource.data.aktif
+        && request.resource.data.email == resource.data.email
+        && request.resource.data.dibuatPada == resource.data.dibuatPada
+        && request.resource.data.nama is string && request.resource.data.nama.size() > 0 && request.resource.data.nama.size() <= 100
+        && request.resource.data.noHp is string && request.resource.data.noHp.size() >= 10 && request.resource.data.noHp.size() <= 20
+      ) || (
+        isSuperAdmin()
+        && request.auth.uid != userId
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['role', 'aktif'])
+        && request.resource.data.role in ['pasien', 'resepsionis', 'dokter', 'super_admin']
+        && request.resource.data.aktif is bool
+        && request.resource.data.email == resource.data.email
+        && request.resource.data.dibuatPada == resource.data.dibuatPada
+      );
+
+      // Hapus akun dilarang dari sisi klien
+      allow delete: if false;
+    }
+
+    // 2. Koleksi Master Layanan Klinik (layanan)
+    match /layanan/{layananId} {
+      // Pasien/Staf aktif hanya boleh membaca layanan yang aktif
+      // Super Admin aktif boleh membaca seluruh layanan (aktif & nonaktif)
+      allow get: if isSuperAdmin() || (isActiveUser() && resource.data.aktif == true);
+      allow list: if isSuperAdmin() || (isActiveUser() && resource.data.aktif == true);
+
+      // Tambah layanan baru via /admin/layanan:
+      // Hanya Super Admin aktif, durasi kelipatan 30 menit, harga >= 0
+      allow create: if isSuperAdmin()
+        && request.resource.data.keys().hasAll(['nama', 'durasiMenit', 'harga', 'aktif', 'dibuatPada'])
+        && request.resource.data.keys().hasOnly(['nama', 'durasiMenit', 'harga', 'aktif', 'dibuatPada'])
+        && request.resource.data.nama is string && request.resource.data.nama.size() > 0 && request.resource.data.nama.size() <= 100
+        && request.resource.data.durasiMenit is int && request.resource.data.durasiMenit % 30 == 0 && request.resource.data.durasiMenit > 0
+        && (request.resource.data.harga is int || request.resource.data.harga is float) && request.resource.data.harga >= 0
+        && request.resource.data.aktif is bool
+        && request.resource.data.dibuatPada is string;
+
+      // Ubah layanan via /admin/layanan (aktif/nonaktifkan atau ubah tarif):
+      // Hanya Super Admin aktif, dibatasi ketat hanya field tertentu yang boleh berubah
+      // dibuatPada tidak boleh diubah, dan dilarang menambahkan field asing
+      allow update: if isSuperAdmin()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['nama', 'durasiMenit', 'harga', 'aktif'])
+        && (!('dibuatPada' in resource.data) || request.resource.data.dibuatPada == resource.data.dibuatPada)
+        && request.resource.data.nama is string && request.resource.data.nama.size() > 0 && request.resource.data.nama.size() <= 100
+        && request.resource.data.durasiMenit is int && request.resource.data.durasiMenit % 30 == 0 && request.resource.data.durasiMenit > 0
+        && (request.resource.data.harga is int || request.resource.data.harga is float) && request.resource.data.harga >= 0
+        && request.resource.data.aktif is bool;
+
+      // Hapus layanan dilarang (PRD 4.14: hanya dinonaktifkan)
+      allow delete: if false;
+    }
+
+    // Koleksi lain ditutup penuh sementara
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

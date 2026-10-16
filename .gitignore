@@ -39,3 +39,6 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+# File materi tugas dan log lokal
+*.pdf
+firestore-debug.log
