@@ -13,11 +13,14 @@ import {
   Info,
 } from "lucide-react";
 import { MOCK_JANJI_TEMU, getUserById, getLayananById } from "@/lib/mockData";
+import { useAuth } from "@/context/AuthContext";
 
 export default function BerandaPage() {
+  const { userProfile } = useAuth();
   // Ambil janji milik pasien Andi (pasien aktif demo) yang belum dibatalkan/selesai atau yang terdekat
   const pasienId = "usr_andi";
   const pasien = getUserById(pasienId);
+  const namaTampil = userProfile?.nama || pasien?.nama || "Pasien";
 
   // Cari janji terdekat
   const janjiPasien = MOCK_JANJI_TEMU.filter(
@@ -39,7 +42,7 @@ export default function BerandaPage() {
               <span>Portal Pasien</span>
             </div>
             <h1 className="text-2xl font-bold text-[#1F2937]">
-              Selamat Datang, {pasien?.nama || "Pasien"}!
+              Selamat Datang, {namaTampil}!
             </h1>
             <p className="text-xs text-[#5A6B78] mt-1">
               Klinik Gigi Senyum Rekah Makassar · Jl. Pengayoman, Makassar
